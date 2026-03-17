@@ -464,7 +464,6 @@ class GaitRuleEngine:
 # ─────────────────────────────────────────────
 
 if __name__ == '__main__':
-    # 用假数据验证模块是否正常工作
     calc = FrameFeatureCalculator()
     engine = GaitRuleEngine()
 
