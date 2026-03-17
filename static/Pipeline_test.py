@@ -9,29 +9,25 @@ import argparse
 import os
 import sys
 
-# ---- 把你的项目路径加进来 ----
-PROJECT_PATH = "/Users/guijianghao/PycharmProjects/PythonProject2"
+PROJECT_PATH = ""#视频路径
 sys.path.append(PROJECT_PATH)
 
 from yolo_detector import YOLOPersonDetector
 from mediapipe_analyzer import MediaPipePoseAnalyzer
-from feature_calculator import FrameFeatureCalculator, TemporalFeatureCalculator, GaitRuleEngine
+from feature_calculator import FrameFeatureCalculator, TemporalFeatureCalculator, GaitRuleEngine,FeatureSmoother
 
 
-# ─────────────────────────────────────────────
-# 固定摄像头 ROI 配置（摄像头固定时直接在这里修改）
-# ─────────────────────────────────────────────
+# 固定摄像头 ROI 配置
 CAMERA_CONFIG = {
     'roi1': (500, 380, 2100, 1260),   # 第一段镜头 (0~5s)：起跑区域
-    'roi2': (802, 10, 1994, 956),                      # 第二段镜头 (5s+)：待确定，填好后取消注释
-    # 'roi2': (880, 0, 1500, 760),     # 示例：确定后改这行
+    'roi2': (802, 10, 1994, 956),     # 第二段镜头 (5s+)：待确定
     'switch_sec':  5.0,                # 镜头切换时间（秒）
     'sprint_sec':  6.0,                # 冲刺阶段开始时间（秒）
     'sprint_interval': 2,              # 冲刺阶段采样间隔（帧）
     'normal_interval': 5,              # 正常阶段采样间隔（帧）
 }
 
-# ===== 颜色池，每个人一个颜色 =====
+#可视化颜色显示
 COLORS = [
     (255, 80,  80),   # 红
     (80,  200, 80),   # 绿
@@ -47,10 +43,8 @@ STATUS_COLOR = {
 }
 
 
-# ─────────────────────────────────────────────
-# 评估面板绘制
-# ─────────────────────────────────────────────
 
+# 评估面板（前端做完了删
 def draw_eval_panel(img, person_id, evaluation, cadence_result, box, color):
     """
     在每个人的检测框右侧绘制评估面板
@@ -119,9 +113,7 @@ def draw_eval_panel(img, person_id, evaluation, cadence_result, box, color):
 
 
 
-# ─────────────────────────────────────────────
-# 自动 ROI 检测（基于背景差分）
-# ─────────────────────────────────────────────
+# 自动 ROI 检测（非固定摄像头）
 
 def auto_detect_roi(video_path, sample_frames=40, padding=60):
     """
@@ -214,10 +206,7 @@ def person_in_roi(box, roi):
     rx1, ry1, rx2, ry2 = roi
     return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
 
-# ─────────────────────────────────────────────
 # 主 Pipeline
-# ─────────────────────────────────────────────
-
 def run_pipeline(video_path, sample_interval=5, max_frames=200,
                  roi1=None, roi2=None, switch_sec=5.0,
                  sprint_sec=6.0, sprint_interval=2):
@@ -248,11 +237,15 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
     feat_calc   = FrameFeatureCalculator()
     time_calc   = TemporalFeatureCalculator(fps=fps, window_seconds=2.0)
     rule_engine = GaitRuleEngine()
+    smoother = FeatureSmoother(alpha=0.5, window_size=5)
 
+    track_stability = {}
+    STABLE_FRAMES = 4
     # 统计
     stats     = {"frames": 0, "total_persons": 0, "pose_ok": 0, "warnings": 0}
     frame_idx = 0
     saved     = 0
+
 
     while cap.isOpened() and saved < max_frames:
         ret, frame = cap.read()
@@ -281,9 +274,20 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
         # 根据当前时间戳选择对应 ROI
         current_roi = roi1 if (frame_idx / fps) < switch_sec else roi2
         people = [p for p in people if person_in_roi(p['box'], current_roi)]
+        people.sort(key=lambda p: (p['box'][0] + p['box'][2]) / 2)
+
+        current_ids = []
+
+        for idx, p in enumerate(people):
+            pid= idx + 1
+            p['roi_id'] = pid
+            current_ids.append(pid)
+            track_stability[pid] = track_stability.get(pid, 0) + 1
 
         for person in people:
-            pid   = person['id']
+            pid = person['roi_id']
+            if track_stability.get(pid, 0) < STABLE_FRAMES:
+                continue
             box   = person['box']
             color = COLORS[(pid - 1) % len(COLORS)]
 
@@ -311,6 +315,11 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
 
             # ── Step 3: 单帧特征计算 ──
             features = feat_calc.compute(kps)
+            features = smoother.update(pid, features)
+
+            for k, v in features.items():
+                if isinstance(v, (int, float)) and abs(v) > 300:
+                    features[k] = None
 
             # ── Step 4: 时序更新 → 步频 ──
             time_calc.update(pid, frame_idx, kps)
@@ -327,11 +336,18 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
             draw_eval_panel(vis, pid, evaluation, cadence_result, box, color)
 
             person_results.append({
-                'id':       pid,
+                'roi_id': pid,  # ROI编号
+                'box': box,
                 'features': features,
-                'cadence':  cadence,
+                'cadence': cadence,
                 'warnings': warn_count,
             })
+
+            person_results.sort(key=lambda x: x['roi_id'])
+
+        disappeared = set(track_stability.keys()) - set(current_ids)
+        for d in disappeared:
+            track_stability.pop(d, None)
 
         # Draw current ROI boundary
         current_roi = roi1 if (frame_idx / fps) < switch_sec else roi2
