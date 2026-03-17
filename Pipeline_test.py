@@ -9,29 +9,23 @@ import argparse
 import os
 import sys
 
-# ---- 把你的项目路径加进来 ----
-PROJECT_PATH = "/Users/guijianghao/PycharmProjects/PythonProject2"
+PROJECT_PATH = ""#视频路径
 sys.path.append(PROJECT_PATH)
 
 from yolo_detector import YOLOPersonDetector
 from mediapipe_analyzer import MediaPipePoseAnalyzer
 from feature_calculator import FrameFeatureCalculator, TemporalFeatureCalculator, GaitRuleEngine
 
-
-# ─────────────────────────────────────────────
-# 固定摄像头 ROI 配置（摄像头固定时直接在这里修改）
-# ─────────────────────────────────────────────
+#ROI
 CAMERA_CONFIG = {
     'roi1': (500, 380, 2100, 1260),   # 第一段镜头 (0~5s)：起跑区域
-    'roi2': (802, 10, 1994, 956),                      # 第二段镜头 (5s+)：待确定，填好后取消注释
-    # 'roi2': (880, 0, 1500, 760),     # 示例：确定后改这行
+    'roi2': (802, 10, 1994, 956),      # 第二段镜头 (5s+)
     'switch_sec':  5.0,                # 镜头切换时间（秒）
     'sprint_sec':  6.0,                # 冲刺阶段开始时间（秒）
     'sprint_interval': 2,              # 冲刺阶段采样间隔（帧）
     'normal_interval': 5,              # 正常阶段采样间隔（帧）
 }
-
-# ===== 颜色池，每个人一个颜色 =====
+#可视化的颜色
 COLORS = [
     (255, 80,  80),   # 红
     (80,  200, 80),   # 绿
@@ -46,15 +40,8 @@ STATUS_COLOR = {
     'unknown': (160, 160, 160),
 }
 
-
-# ─────────────────────────────────────────────
-# 评估面板绘制
-# ─────────────────────────────────────────────
-
+#前端完成之后这块可以删
 def draw_eval_panel(img, person_id, evaluation, cadence_result, box, color):
-    """
-    在每个人的检测框右侧绘制评估面板
-    """
     x1, y1, x2, y2 = box
     panel_x = x2 + 8
     panel_y = y1
@@ -118,11 +105,7 @@ def draw_eval_panel(img, person_id, evaluation, cadence_result, box, color):
 
 
 
-
-# ─────────────────────────────────────────────
-# 自动 ROI 检测（基于背景差分）
-# ─────────────────────────────────────────────
-
+# 非儿童端固定那几个摄像头的时候可以用
 def auto_detect_roi(video_path, sample_frames=40, padding=60):
     """
     自动检测跑道中运动区域，作为分析ROI。
@@ -214,10 +197,8 @@ def person_in_roi(box, roi):
     rx1, ry1, rx2, ry2 = roi
     return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
 
-# ─────────────────────────────────────────────
-# 主 Pipeline
-# ─────────────────────────────────────────────
 
+# 主 Pipeline
 def run_pipeline(video_path, sample_interval=5, max_frames=200,
                  roi1=None, roi2=None, switch_sec=5.0,
                  sprint_sec=6.0, sprint_interval=2):
@@ -260,7 +241,7 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
             break
 
         # 根据时间段选择采样间隔
-        # 第二镜头冲刺阶段（sprint_sec之后）用更密的采样
+        # 第二镜头冲刺阶段（sprint_sec之后）采样密度大
         current_sec = frame_idx / fps
         if current_sec >= switch_sec and current_sec >= sprint_sec:
             active_interval = sprint_interval   # 冲刺阶段：每2帧采一次
@@ -281,9 +262,13 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
         # 根据当前时间戳选择对应 ROI
         current_roi = roi1 if (frame_idx / fps) < switch_sec else roi2
         people = [p for p in people if person_in_roi(p['box'], current_roi)]
+        people.sort(key=lambda p: (p['box'][0] + p['box'][2]) / 2)
+
+        for idx, p in enumerate(people):
+            p['roi_id'] = idx + 1
 
         for person in people:
-            pid   = person['id']
+            pid = person['roi_id']
             box   = person['box']
             color = COLORS[(pid - 1) % len(COLORS)]
 
@@ -327,11 +312,14 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
             draw_eval_panel(vis, pid, evaluation, cadence_result, box, color)
 
             person_results.append({
-                'id':       pid,
+                'roi_id': pid,  # ROI编号
+                'box': box,
                 'features': features,
-                'cadence':  cadence,
+                'cadence': cadence,
                 'warnings': warn_count,
             })
+
+            person_results.sort(key=lambda x: x['roi_id'])
 
         # Draw current ROI boundary
         current_roi = roi1 if (frame_idx / fps) < switch_sec else roi2
@@ -377,10 +365,7 @@ def run_pipeline(video_path, sample_interval=5, max_frames=200,
     print(f"\nSaved to: {out_dir}")
 
 
-# ─────────────────────────────────────────────
 # 工具函数
-# ─────────────────────────────────────────────
-
 def draw_skeleton(img, kps, color):
     connections = [
         ('left_shoulder',  'right_shoulder'),
